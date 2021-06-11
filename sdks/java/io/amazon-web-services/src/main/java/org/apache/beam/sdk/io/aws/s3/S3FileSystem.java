@@ -23,7 +23,6 @@ import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Prec
 
 import com.amazonaws.AmazonClientException;
 import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.model.AmazonS3Exception;
 import com.amazonaws.services.s3.model.CompleteMultipartUploadRequest;
 import com.amazonaws.services.s3.model.CompleteMultipartUploadResult;
@@ -62,11 +61,9 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.io.FileSystem;
-import org.apache.beam.sdk.io.aws.options.S3ClientBuilderFactory;
 import org.apache.beam.sdk.io.aws.options.S3Options;
 import org.apache.beam.sdk.io.fs.CreateOptions;
 import org.apache.beam.sdk.io.fs.MatchResult;
-import org.apache.beam.sdk.util.InstanceBuilder;
 import org.apache.beam.sdk.util.MoreFutures;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
@@ -83,6 +80,11 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * {@link FileSystem} implementation for storage systems that use the S3 protocol.
+ *
+ * @see S3FileSystemSchemeRegistrar
+ */
 class S3FileSystem extends FileSystem<S3ResourceId> {
 
   private static final Logger LOG = LoggerFactory.getLogger(S3FileSystem.class);
@@ -99,30 +101,29 @@ class S3FileSystem extends FileSystem<S3ResourceId> {
 
   // Non-final for testing.
   private Supplier<AmazonS3> amazonS3;
-  private final S3Options options;
+  private final S3FileSystemConfiguration config;
   private final ListeningExecutorService executorService;
 
-  S3FileSystem(S3Options options) {
-    this.options = checkNotNull(options, "options");
-    AmazonS3ClientBuilder builder =
-        InstanceBuilder.ofType(S3ClientBuilderFactory.class)
-            .fromClass(options.getS3ClientFactoryClass())
-            .build()
-            .createBuilder(options);
+  S3FileSystem(S3FileSystemConfiguration config) {
+    this.config = checkNotNull(config, "config");
     // The Supplier is to make sure we don't call .build() unless we are actually using S3.
-    amazonS3 = Suppliers.memoize(builder::build);
+    amazonS3 = Suppliers.memoize(config.getS3ClientBuilder()::build);
 
-    checkNotNull(options.getS3StorageClass(), "storageClass");
-    checkArgument(options.getS3ThreadPoolSize() > 0, "threadPoolSize");
+    checkNotNull(config.getS3StorageClass(), "storageClass");
+    checkArgument(config.getS3ThreadPoolSize() > 0, "threadPoolSize");
     executorService =
         MoreExecutors.listeningDecorator(
             Executors.newFixedThreadPool(
-                options.getS3ThreadPoolSize(), new ThreadFactoryBuilder().setDaemon(true).build()));
+                config.getS3ThreadPoolSize(), new ThreadFactoryBuilder().setDaemon(true).build()));
+  }
+
+  S3FileSystem(S3Options options) {
+    this(S3FileSystemConfiguration.fromS3Options(options).build());
   }
 
   @Override
   protected String getScheme() {
-    return S3ResourceId.SCHEME;
+    return config.getScheme();
   }
 
   @VisibleForTesting
@@ -317,7 +318,8 @@ class S3FileSystem extends FileSystem<S3ResourceId> {
         // Filter against regex.
         if (wildcardRegexp.matcher(objectSummary.getKey()).matches()) {
           S3ResourceId expandedPath =
-              S3ResourceId.fromComponents(objectSummary.getBucketName(), objectSummary.getKey())
+              S3ResourceId.fromComponents(
+                      glob.getScheme(), objectSummary.getBucketName(), objectSummary.getKey())
                   .withSize(objectSummary.getSize())
                   .withLastModified(objectSummary.getLastModified());
           LOG.debug("Expanded S3 object path {}", expandedPath);
@@ -354,7 +356,7 @@ class S3FileSystem extends FileSystem<S3ResourceId> {
   private ObjectMetadata getObjectMetadata(S3ResourceId s3ResourceId) throws AmazonClientException {
     GetObjectMetadataRequest request =
         new GetObjectMetadataRequest(s3ResourceId.getBucket(), s3ResourceId.getKey());
-    request.setSSECustomerKey(options.getSSECustomerKey());
+    request.setSSECustomerKey(config.getSSECustomerKey());
     return amazonS3.get().getObjectMetadata(request);
   }
 
@@ -458,12 +460,12 @@ class S3FileSystem extends FileSystem<S3ResourceId> {
   @Override
   protected WritableByteChannel create(S3ResourceId resourceId, CreateOptions createOptions)
       throws IOException {
-    return new S3WritableByteChannel(amazonS3.get(), resourceId, createOptions.mimeType(), options);
+    return new S3WritableByteChannel(amazonS3.get(), resourceId, createOptions.mimeType(), config);
   }
 
   @Override
   protected ReadableByteChannel open(S3ResourceId resourceId) throws IOException {
-    return new S3ReadableSeekableByteChannel(amazonS3.get(), resourceId, options);
+    return new S3ReadableSeekableByteChannel(amazonS3.get(), resourceId, config);
   }
 
   @Override
@@ -516,9 +518,9 @@ class S3FileSystem extends FileSystem<S3ResourceId> {
             destinationPath.getBucket(),
             destinationPath.getKey());
     copyObjectRequest.setNewObjectMetadata(sourceObjectMetadata);
-    copyObjectRequest.setStorageClass(options.getS3StorageClass());
-    copyObjectRequest.setSourceSSECustomerKey(options.getSSECustomerKey());
-    copyObjectRequest.setDestinationSSECustomerKey(options.getSSECustomerKey());
+    copyObjectRequest.setStorageClass(config.getS3StorageClass());
+    copyObjectRequest.setSourceSSECustomerKey(config.getSSECustomerKey());
+    copyObjectRequest.setDestinationSSECustomerKey(config.getSSECustomerKey());
     return amazonS3.get().copyObject(copyObjectRequest);
   }
 
@@ -528,9 +530,9 @@ class S3FileSystem extends FileSystem<S3ResourceId> {
       throws AmazonClientException {
     InitiateMultipartUploadRequest initiateUploadRequest =
         new InitiateMultipartUploadRequest(destinationPath.getBucket(), destinationPath.getKey())
-            .withStorageClass(options.getS3StorageClass())
+            .withStorageClass(config.getS3StorageClass())
             .withObjectMetadata(sourceObjectMetadata);
-    initiateUploadRequest.setSSECustomerKey(options.getSSECustomerKey());
+    initiateUploadRequest.setSSECustomerKey(config.getSSECustomerKey());
 
     InitiateMultipartUploadResult initiateUploadResult =
         amazonS3.get().initiateMultipartUpload(initiateUploadRequest);
@@ -550,14 +552,14 @@ class S3FileSystem extends FileSystem<S3ResourceId> {
               .withDestinationKey(destinationPath.getKey())
               .withUploadId(uploadId)
               .withPartNumber(1);
-      copyPartRequest.setSourceSSECustomerKey(options.getSSECustomerKey());
-      copyPartRequest.setDestinationSSECustomerKey(options.getSSECustomerKey());
+      copyPartRequest.setSourceSSECustomerKey(config.getSSECustomerKey());
+      copyPartRequest.setDestinationSSECustomerKey(config.getSSECustomerKey());
 
       CopyPartResult copyPartResult = amazonS3.get().copyPart(copyPartRequest);
       eTags.add(copyPartResult.getPartETag());
     } else {
       long bytePosition = 0;
-      Integer uploadBufferSizeBytes = options.getS3UploadBufferSizeBytes();
+      Integer uploadBufferSizeBytes = config.getS3UploadBufferSizeBytes();
       // Amazon parts are 1-indexed, not zero-indexed.
       for (int partNumber = 1; bytePosition < objectSize; partNumber++) {
         final CopyPartRequest copyPartRequest =
@@ -570,8 +572,8 @@ class S3FileSystem extends FileSystem<S3ResourceId> {
                 .withPartNumber(partNumber)
                 .withFirstByte(bytePosition)
                 .withLastByte(Math.min(objectSize - 1, bytePosition + uploadBufferSizeBytes - 1));
-        copyPartRequest.setSourceSSECustomerKey(options.getSSECustomerKey());
-        copyPartRequest.setDestinationSSECustomerKey(options.getSSECustomerKey());
+        copyPartRequest.setSourceSSECustomerKey(config.getSSECustomerKey());
+        copyPartRequest.setDestinationSSECustomerKey(config.getSSECustomerKey());
 
         CopyPartResult copyPartResult = amazonS3.get().copyPart(copyPartRequest);
         eTags.add(copyPartResult.getPartETag());

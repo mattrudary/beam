@@ -31,11 +31,15 @@ import org.mockito.Mockito;
 
 /** Utils to test S3 filesystem. */
 class S3TestUtils {
-  static S3Options s3Options() {
+  private static S3FileSystemConfiguration.Builder configBuilder(String scheme) {
     S3Options options = PipelineOptionsFactory.as(S3Options.class);
     options.setAwsRegion("us-west-1");
     options.setS3UploadBufferSizeBytes(5_242_880);
-    return options;
+    return S3FileSystemConfiguration.fromS3Options(options).setScheme(scheme);
+  }
+
+  static S3FileSystemConfiguration s3Config(String scheme) {
+    return configBuilder(scheme).build();
   }
 
   static S3Options s3OptionsWithCustomEndpointAndPathStyleAccessEnabled() {
@@ -47,49 +51,56 @@ class S3TestUtils {
     return options;
   }
 
-  static S3Options s3OptionsWithSSEAlgorithm() {
-    S3Options options = s3Options();
-    options.setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION);
-    return options;
+  static S3FileSystemConfiguration s3ConfigWithCustomEndpointAndPathStyleAccessEnabled(
+      String scheme) {
+    return S3FileSystemConfiguration.fromS3Options(
+            s3OptionsWithCustomEndpointAndPathStyleAccessEnabled())
+        .setScheme(scheme)
+        .build();
   }
 
-  static S3Options s3OptionsWithSSECustomerKey() {
-    S3Options options = s3Options();
-    options.setSSECustomerKey(new SSECustomerKey("86glyTlCNZgccSxW8JxMa6ZdjdK3N141glAysPUZ3AA="));
-    return options;
+  static S3FileSystemConfiguration s3ConfigWithSSEAlgorithm(String scheme) {
+    return configBuilder(scheme)
+        .setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION)
+        .build();
   }
 
-  static S3Options s3OptionsWithSSEAwsKeyManagementParams() {
-    S3Options options = s3Options();
+  static S3FileSystemConfiguration s3ConfigWithSSECustomerKey(String scheme) {
+    return configBuilder(scheme)
+        .setSSECustomerKey(new SSECustomerKey("86glyTlCNZgccSxW8JxMa6ZdjdK3N141glAysPUZ3AA="))
+        .build();
+  }
+
+  static S3FileSystemConfiguration s3ConfigWithSSEAwsKeyManagementParams(String scheme) {
     String awsKmsKeyId =
         "arn:aws:kms:eu-west-1:123456789012:key/dc123456-7890-ABCD-EF01-234567890ABC";
     SSEAwsKeyManagementParams sseAwsKeyManagementParams =
         new SSEAwsKeyManagementParams(awsKmsKeyId);
-    options.setSSEAwsKeyManagementParams(sseAwsKeyManagementParams);
-    return options;
+    return configBuilder(scheme).setSSEAwsKeyManagementParams(sseAwsKeyManagementParams).build();
   }
 
-  static S3Options s3OptionsWithMultipleSSEOptions() {
-    S3Options options = s3OptionsWithSSEAwsKeyManagementParams();
-    options.setSSECustomerKey(new SSECustomerKey("86glyTlCNZgccSxW8JxMa6ZdjdK3N141glAysPUZ3AA="));
-    return options;
+  static S3FileSystemConfiguration s3ConfigWithMultipleSSEOptions(String scheme) {
+    return s3ConfigWithSSEAwsKeyManagementParams(scheme)
+        .toBuilder()
+        .setSSECustomerKey(new SSECustomerKey("86glyTlCNZgccSxW8JxMa6ZdjdK3N141glAysPUZ3AA="))
+        .build();
   }
 
-  static S3FileSystem buildMockedS3FileSystem(S3Options options) {
-    return buildMockedS3FileSystem(options, Mockito.mock(AmazonS3.class));
+  static S3FileSystem buildMockedS3FileSystem(S3FileSystemConfiguration config) {
+    return buildMockedS3FileSystem(config, Mockito.mock(AmazonS3.class));
   }
 
-  static S3FileSystem buildMockedS3FileSystem(S3Options options, AmazonS3 client) {
-    S3FileSystem s3FileSystem = new S3FileSystem(options);
+  static S3FileSystem buildMockedS3FileSystem(S3FileSystemConfiguration config, AmazonS3 client) {
+    S3FileSystem s3FileSystem = new S3FileSystem(config);
     s3FileSystem.setAmazonS3Client(client);
     return s3FileSystem;
   }
 
   @Nullable
-  static String getSSECustomerKeyMd5(S3Options options) {
-    SSECustomerKey sseCostumerKey = options.getSSECustomerKey();
-    if (sseCostumerKey != null) {
-      return Base64.encodeAsString(DigestUtils.md5(Base64.decode(sseCostumerKey.getKey())));
+  static String getSSECustomerKeyMd5(S3FileSystemConfiguration config) {
+    SSECustomerKey key = config.getSSECustomerKey();
+    if (key != null) {
+      return Base64.encodeAsString(DigestUtils.md5(Base64.decode(key.getKey())));
     }
     return null;
   }
